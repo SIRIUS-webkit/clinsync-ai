@@ -91,10 +91,8 @@ class HuggingFaceLLM:
             output_ids = self._model.generate(
                 **inputs,
                 max_new_tokens=max_tokens,
-                do_sample=True,
-                temperature=0.7,
-                top_p=0.9,
-                pad_token_id=self._tokenizer.eos_token_id,
+                do_sample=False,  # Greedy decoding for stability
+                pad_token_id=self._tokenizer.eos_token_id or self._tokenizer.pad_token_id or 0,
             )
 
         # Decode only the new tokens

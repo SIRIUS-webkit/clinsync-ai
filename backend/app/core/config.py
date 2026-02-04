@@ -32,9 +32,9 @@ class Settings(BaseSettings):
     ollama_model: str = "gemma3:4b"
     ollama_timeout_seconds: int = 30
 
-    # HuggingFace LLM settings
-    hf_llm_model_id: str = "google/gemma-3-4b-it"
-    hf_llm_max_new_tokens: int = 1024
+    # HuggingFace LLM settings (text-only model, not multimodal)
+    hf_llm_model_id: str = "Qwen/Qwen2.5-3B-Instruct"
+    hf_llm_max_new_tokens: int = 512
 
     device: str = "cuda"
     max_workers: int = 4
