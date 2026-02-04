@@ -60,6 +60,15 @@ class MedGemmaWrapper:
                 )
             self._model.eval()
 
+    def _format_prompt(self, prompt: str, has_image: bool) -> str:
+        """Format prompt with image token if needed."""
+        if has_image:
+            # MedGemma requires <image> token in the prompt to reference the image
+            if "<image>" not in prompt.lower():
+                # Prepend image token for vision-language understanding
+                return f"<image>\n{prompt}"
+        return prompt
+
     def generate(
         self,
         prompt: str,
@@ -71,7 +80,22 @@ class MedGemmaWrapper:
         if self._model is None or self._processor is None:
             raise RuntimeError("MedGemma model failed to load.")
 
-        inputs = self._processor(text=prompt, images=image, return_tensors="pt")
+        # Format prompt with image token if image is provided
+        formatted_prompt = self._format_prompt(prompt, has_image=image is not None)
+
+        # Process inputs - pass image as list if provided
+        if image is not None:
+            inputs = self._processor(
+                text=formatted_prompt,
+                images=[image],
+                return_tensors="pt",
+            )
+        else:
+            inputs = self._processor(
+                text=formatted_prompt,
+                return_tensors="pt",
+            )
+
         device = next(self._model.parameters()).device
         inputs = {key: value.to(device) for key, value in inputs.items()}
 
@@ -81,5 +105,12 @@ class MedGemmaWrapper:
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
             )
+
+        # Decode and remove the input prompt from output
         output = self._processor.batch_decode(output_ids, skip_special_tokens=True)[0]
+
+        # Remove the original prompt from the output if present
+        if formatted_prompt in output:
+            output = output.replace(formatted_prompt, "").strip()
+
         return output.strip()
