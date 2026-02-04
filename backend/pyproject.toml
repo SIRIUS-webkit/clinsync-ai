@@ -1,0 +1,42 @@
+[project]
+name = "clinsync-ai"
+version = "1.0.0"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi[standard]",
+  "uvicorn[standard]",
+  "python-socketio",
+  "websockets",
+  "torch>=2.2.0",
+  "transformers>=4.37.0",
+  "onnxruntime-gpu; platform_system != 'Darwin'",
+  "onnxruntime; platform_system == 'Darwin'",
+  "accelerate",
+  "bitsandbytes",
+  "peft",
+  "huggingface-hub",
+  "aiohttp",
+  "redis",
+  "sqlalchemy",
+  "alembic",
+  "python-multipart",
+  "pydantic-settings",
+  "python-dotenv",
+  "librosa",
+  "soundfile",
+  "pillow",
+  "opencv-python",
+]
+
+[dependency-groups]
+dev = [
+  "pytest",
+  "black",
+  "ruff",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.uv.pip]
+index-strategy = "unsafe-best-match"
