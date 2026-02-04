@@ -24,9 +24,17 @@ class Settings(BaseSettings):
     medasr_model_id: str = "google/medasr"
     hear_model_id: str = "google/hear"
 
+    # LLM backend: "ollama", "huggingface", or "auto" (tries ollama first, falls back to hf)
+    llm_backend: str = "auto"
+
+    # Ollama settings
     ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "gemma3:1b"
+    ollama_model: str = "gemma3:4b"
     ollama_timeout_seconds: int = 30
+
+    # HuggingFace LLM settings
+    hf_llm_model_id: str = "google/gemma-3-4b-it"
+    hf_llm_max_new_tokens: int = 1024
 
     device: str = "cuda"
     max_workers: int = 4
