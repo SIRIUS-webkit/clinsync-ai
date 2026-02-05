@@ -8,7 +8,7 @@ dependencies = [
   "python-socketio",
   "websockets",
   "torch>=2.2.0",
-  "transformers>=4.37.0",
+  "transformers>=4.40.0",
   "onnxruntime-gpu; platform_system != 'Darwin'",
   "onnxruntime; platform_system == 'Darwin'",
   "accelerate",
