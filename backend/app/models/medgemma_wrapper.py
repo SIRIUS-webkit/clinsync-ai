@@ -248,14 +248,21 @@ Describe cellular structures, abnormalities, and potential diagnoses.""",
             # Build chat messages
             messages = self._build_chat_messages(prompt, pil_image, system_prompt)
             
-            # Apply chat template and tokenize
-            inputs = self._processor.apply_chat_template(
+            # Build prompt text with chat template
+            prompt_text = self._processor.apply_chat_template(
                 messages,
                 add_generation_prompt=True,
-                tokenize=True,
-                return_dict=True,
-                return_tensors="pt",
+                tokenize=False,
             )
+            
+            # Encode text (and image if provided)
+            processor_kwargs: dict[str, Any] = {
+                "text": prompt_text,
+                "return_tensors": "pt",
+            }
+            if pil_image is not None:
+                processor_kwargs["images"] = pil_image
+            inputs = self._processor(**processor_kwargs)
             
             # Move to device
             inputs = {k: v.to(self._model.device) for k, v in inputs.items()}
@@ -279,8 +286,23 @@ Describe cellular structures, abnormalities, and potential diagnoses.""",
                 )
             
             # Decode only new tokens (remove input)
-            new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
-            raw_response = self._processor.decode(new_tokens, skip_special_tokens=True)
+            input_len = inputs["input_ids"].shape[1] if "input_ids" in inputs else 0
+            new_tokens = outputs[0][input_len:] if input_len else outputs[0]
+            raw_response = self._processor.decode(new_tokens, skip_special_tokens=True).strip()
+            if not raw_response:
+                # Fallback to full decode if no new tokens or only special tokens
+                full_decoded = self._processor.decode(outputs[0], skip_special_tokens=True).strip()
+                if full_decoded:
+                    if prompt_text and prompt_text in full_decoded:
+                        raw_response = full_decoded.split(prompt_text, 1)[-1].strip()
+                    else:
+                        raw_response = full_decoded
+                if not raw_response:
+                    logger.warning(
+                        "MedGemma produced empty response (input_len=%s, output_len=%s)",
+                        input_len,
+                        outputs[0].shape[-1],
+                    )
             
             # Parse structured output
             parsed = self._parse_medical_response(raw_response)
@@ -317,13 +339,18 @@ Describe cellular structures, abnormalities, and potential diagnoses.""",
 
     def _parse_medical_response(self, raw_response: str) -> dict[str, Any]:
         """Parse raw model output into structured medical format."""
+        logger.info("Raw response: %s", raw_response)
+        if not raw_response or not raw_response.strip():
+            logger.warning("MedGemma returned empty raw response")
+        
         # Clean response
         cleaned = raw_response.strip()
+        logger.info("Cleaned response: %r", cleaned)
         
         # Remove common prefixes
         prefixes_to_remove = [
             "assistant",
-            "medical assistant",
+            "medical assistant", 
             "radiology assistant",
         ]
         for prefix in prefixes_to_remove:
@@ -331,6 +358,8 @@ Describe cellular structures, abnormalities, and potential diagnoses.""",
                 cleaned = cleaned[len(prefix):].strip()
                 # Remove leading punctuation
                 cleaned = cleaned.lstrip(":").strip()
+        
+        logger.info("After prefix removal: %r", cleaned)
         
         # Extract confidence
         confidence = self._extract_confidence(cleaned)

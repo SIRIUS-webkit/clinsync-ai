@@ -49,7 +49,8 @@ async def analyze_image(
             image_bytes=image_bytes,
             audio_bytes=None,
         )
-        
+
+        logger.info("Result: %s", result)
         # Return simplified response for API
         return {
             "success": True,

@@ -120,6 +120,7 @@ class AIOrchestrator:
             transcript=transcript_result.get("text") if isinstance(transcript_result, dict) else None,
             audio_analysis=audio_analysis_result if isinstance(audio_analysis_result, dict) else None,
         )
+        logger.info("Final response: %s", final_response)
 
         return {
             "response": final_response,
@@ -200,6 +201,7 @@ class AIOrchestrator:
         prompt += "\n\nProvide a concise, clinically appropriate response. Include triage level (LOW/MODERATE/HIGH) and next steps."
 
         try:
+            logger.info("Synthesizing response with prompt ollama: %s", prompt)
             return await self._ollama.synthesize(prompt)
         except Exception as e:
             logger.error("Response synthesis failed: %s", e)

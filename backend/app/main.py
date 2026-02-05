@@ -3,6 +3,12 @@ from __future__ import annotations
 
 import logging
 
+# Configure logging to show all levels in the console
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 

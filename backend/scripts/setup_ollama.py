@@ -9,7 +9,7 @@ import sys
 import urllib.request
 
 OLLAMA_HOST = "http://localhost:11434"
-DEFAULT_MODEL = "gemma3:4b"
+DEFAULT_MODEL = "gemma3:1b"
 
 logger = logging.getLogger(__name__)
 
