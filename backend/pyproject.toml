@@ -26,6 +26,7 @@ dependencies = [
   "soundfile",
   "pillow",
   "opencv-python",
+  "firebase-admin",
 ]
 
 [dependency-groups]

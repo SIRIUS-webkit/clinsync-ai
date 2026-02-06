@@ -1,4 +1,5 @@
 """MedASR wrapper for streaming speech-to-text with medical vocabulary."""
+
 from __future__ import annotations
 
 import io
@@ -43,7 +44,9 @@ class MedASRWrapper:
                     device=device,
                 )
             except Exception as exc:  # pylint: disable=broad-exception-caught
-                logger.warning("MedASR load failed, falling back to whisper-small: %s", exc)
+                logger.warning(
+                    "MedASR load failed, falling back to whisper-small: %s", exc
+                )
                 self._pipeline = pipeline(
                     task="automatic-speech-recognition",
                     model="openai/whisper-small",
@@ -52,10 +55,30 @@ class MedASRWrapper:
 
     @staticmethod
     def _decode_audio(audio_bytes: bytes) -> Tuple[np.ndarray, int]:
-        audio_array, sample_rate = sf.read(io.BytesIO(audio_bytes), dtype="float32")
-        if audio_array.ndim > 1:
-            audio_array = np.mean(audio_array, axis=1)
-        return audio_array, sample_rate
+        import tempfile
+        import os
+        import librosa
+
+        # Try direct read first (for WAV/FLAC)
+        try:
+            audio_array, sample_rate = sf.read(io.BytesIO(audio_bytes), dtype="float32")
+            if audio_array.ndim > 1:
+                audio_array = np.mean(audio_array, axis=1)
+            return audio_array, sample_rate
+        except Exception:
+            # Fallback to temp file for WebM/Opus/MP3 which librosa/sf handle better as files
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as tmp:
+                tmp.write(audio_bytes)
+                tmp.flush()
+                tmp_path = tmp.name
+
+            try:
+                # librosa.load handles resampling and mono conversion automatically
+                audio_array, sample_rate = librosa.load(tmp_path, sr=16000, mono=True)
+                return audio_array, sample_rate
+            finally:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
 
     def transcribe(self, audio_bytes: bytes) -> str:
         """Transcribe full audio payload into text."""

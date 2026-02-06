@@ -36,7 +36,8 @@ RUN python -m pip install --upgrade pip && \
     librosa \
     soundfile \
     pillow \
-    opencv-python
+    opencv-python \
+    firebase-admin
 
 COPY app /app/app
 COPY scripts /app/scripts

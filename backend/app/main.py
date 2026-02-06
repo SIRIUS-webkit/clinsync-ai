@@ -1,4 +1,5 @@
 """FastAPI entrypoint for ClinSync AI."""
+
 from __future__ import annotations
 
 import logging
@@ -17,6 +18,7 @@ from app.core.config import get_settings
 from app.services.ai_orchestrator import AIOrchestrator
 from app.services.redis_queue import RedisQueue
 from app.services.webrtc_manager import WebRTCManager
+from app.services.firebase_service import initialize_firebase
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +50,11 @@ async def on_startup() -> None:
     logger.info("Starting ClinSync AI backend.")
     app.state.ai_orchestrator = AIOrchestrator(settings=settings)
     app.state.webrtc_manager = WebRTCManager(settings=settings)
+
     app.state.redis_queue = await RedisQueue.create(settings=settings)
+
+    # Initialize Firebase
+    initialize_firebase()
 
 
 @app.on_event("shutdown")

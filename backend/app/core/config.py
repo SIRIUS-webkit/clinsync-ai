@@ -1,4 +1,5 @@
 """Application configuration with .env support."""
+
 from __future__ import annotations
 
 from functools import lru_cache
@@ -29,7 +30,7 @@ class Settings(BaseSettings):
 
     # Ollama settings
     ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "gemma3:1b"
+    ollama_model: str = "hf.co/unsloth/medgemma-4b-it-GGUF:Q4_K_M"
     ollama_timeout_seconds: int = 30
 
     # HuggingFace LLM settings (text-only model, not multimodal)
@@ -51,6 +52,9 @@ class Settings(BaseSettings):
     asr_chunk_seconds: float = 5.0
 
     anonymization_salt: str = "clinsync-ai"
+
+    # Firebase settings
+    firebase_credentials_path: str = "serviceAccountKey.json"
 
 
 @lru_cache
