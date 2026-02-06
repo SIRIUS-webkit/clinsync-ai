@@ -38,6 +38,8 @@ export default function ConsultationVideoPage() {
   const setAnalysisData = useAnalysisStore((s) => s.setFromResponse);
   const [aiAnalyzing, setAiAnalyzing] = React.useState(false);
   const [isTalking, setIsTalking] = React.useState(false);
+  const [isProcessing, setIsProcessing] = React.useState(false);
+  const [isSpeaking, setIsSpeaking] = React.useState(false);
   const [overlayItems, setOverlayItems] = React.useState(overlayFindingsDefault);
 
   React.useEffect(() => {
@@ -107,10 +109,12 @@ export default function ConsultationVideoPage() {
     
     recorder.onstop = async () => {
         setIsTalking(false);
+        setIsProcessing(true); // Start processing animation
+        
         const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
         const audioFile = new File([audioBlob], "voice_input.webm", { type: "audio/webm" });
         
-        toast("Processing your request...");
+        const processingStart = Date.now();
         
         // Capture specific frame for this interaction
         if (localVideoRef.current) {
@@ -120,7 +124,10 @@ export default function ConsultationVideoPage() {
             canvas.getContext("2d")?.drawImage(localVideoRef.current, 0, 0);
             
             canvas.toBlob(async (imageBlob) => {
-                if (!imageBlob) return;
+                if (!imageBlob) {
+                    setIsProcessing(false);
+                    return;
+                }
                 const imageFile = new File([imageBlob], "context_image.jpg", { type: "image/jpeg" });
                 
                 try {
@@ -130,7 +137,13 @@ export default function ConsultationVideoPage() {
                         image: imageFile,
                         mode: "voice"  // Conversational mode for real-time consultation
                     });
-                     // Cast to any to access custom fields if needed, simplified for safe access
+                    
+                    const processingTime = Date.now() - processingStart;
+                    console.log(`Processing took ${processingTime}ms`);
+                    
+                    setIsProcessing(false); // Stop processing animation
+                    
+                    // Cast to any to access custom fields if needed, simplified for safe access
                     const data = response as any;
                     setAnalysisData(data);
                     
@@ -147,13 +160,12 @@ export default function ConsultationVideoPage() {
                         window.speechSynthesis.cancel();
                         
                         const utterance = new SpeechSynthesisUtterance(cleanText);
-                        utterance.rate = 1.0;
+                        utterance.rate = 1.1; // Slightly faster for more natural conversation
                         utterance.pitch = 1.0;
                         
                         // Robust voice selection
                         const loadVoices = () => {
                             const voices = window.speechSynthesis.getVoices();
-                            console.log("Available voices:", voices.length);
                             
                             // Preferred voices in order
                             const preferredVoice = voices.find(v => v.name.includes("Google US English")) || 
@@ -163,12 +175,20 @@ export default function ConsultationVideoPage() {
                                                  
                             if (preferredVoice) {
                                 utterance.voice = preferredVoice;
-                                console.log("Using voice:", preferredVoice.name);
                             }
                             
-                            utterance.onerror = (e) => console.error("Speech synthesis error:", e);
-                            utterance.onstart = () => console.log("Speech started");
-                            utterance.onend = () => console.log("Speech finished");
+                            utterance.onerror = (e) => {
+                                console.error("Speech synthesis error:", e);
+                                setIsSpeaking(false);
+                            };
+                            utterance.onstart = () => {
+                                console.log("Speech started");
+                                setIsSpeaking(true); // Start speaking animation
+                            };
+                            utterance.onend = () => {
+                                console.log("Speech finished");
+                                setIsSpeaking(false); // Stop speaking animation
+                            };
                             
                             window.speechSynthesis.speak(utterance);
                         };
@@ -186,10 +206,14 @@ export default function ConsultationVideoPage() {
                     }
 
                 } catch (error) {
+                    setIsProcessing(false);
+                    setIsSpeaking(false);
                     toast.error("Failed to process request");
                     console.error(error);
                 }
             }, "image/jpeg", 0.8);
+        } else {
+            setIsProcessing(false);
         }
     };
     
@@ -247,30 +271,135 @@ export default function ConsultationVideoPage() {
     setCameraOff((prev) => !prev);
   };
 
+  const endCall = () => {
+    // Stop all media tracks
+    if (localStream) {
+      localStream.getTracks().forEach((track) => {
+        track.stop();
+      });
+      setLocalStream(null);
+    }
+    
+    // Stop any ongoing speech
+    window.speechSynthesis.cancel();
+    
+    // Stop any recording
+    if (mediaRecorderRef.current) {
+      try {
+        mediaRecorderRef.current.stop();
+      } catch (e) {
+        // Ignore if already stopped
+      }
+      mediaRecorderRef.current = null;
+    }
+    
+    // Clear analysis interval
+    if (analysisIntervalRef.current) {
+      clearInterval(analysisIntervalRef.current);
+      analysisIntervalRef.current = null;
+    }
+    
+    // Destroy peer connection
+    if (peerRef.current) {
+      peerRef.current.destroy();
+      peerRef.current = null;
+    }
+    
+    toast.success("Call ended");
+  };
+
   return (
     <>
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
         <div className="relative flex min-h-0 flex-1 basis-[70%] flex-col">
           <Card className="m-2 flex flex-1 flex-col overflow-hidden lg:m-4">
             <CardContent className="relative flex flex-1 flex-col p-0">
-              <div className="relative flex-1 bg-black">
-                <video
-                  ref={remoteVideoRef}
-                  autoPlay
-                  playsInline
-                  className="h-full w-full object-cover"
-                />
-                {!remoteStream && (
-                  <div className="absolute inset-0 flex flex-col items-center justify-center text-sm text-white/80">
-                    Waiting for remote stream…
+              <div className="relative flex-1 bg-gradient-to-br from-slate-900 via-blue-950 to-purple-950 min-h-[400px]">
+                {/* Main Area - AI Assistant Avatar (Full Size) */}
+                <div className="absolute inset-0 flex flex-col items-center justify-center">
+                  {/* Animated background circles - intensify during activity */}
+                  <div className="absolute inset-0 overflow-hidden">
+                    <div className={cn(
+                      "absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-96 h-96 rounded-full blur-3xl transition-all duration-500",
+                      isProcessing ? "bg-yellow-500/30 animate-pulse scale-110" :
+                      isSpeaking ? "bg-green-500/20 animate-pulse" :
+                      isTalking ? "bg-blue-500/20 animate-pulse" :
+                      "bg-blue-500/10"
+                    )} />
+                    <div className={cn(
+                      "absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-64 h-64 rounded-full blur-2xl transition-all duration-500",
+                      isProcessing ? "bg-orange-500/30" :
+                      isSpeaking ? "bg-emerald-500/30" :
+                      "bg-purple-500/20"
+                    )} />
                   </div>
-                )}
+                  
+                  {/* AI Avatar */}
+                  <motion.div
+                    initial={{ scale: 0.8, opacity: 0 }}
+                    animate={{ 
+                      scale: isSpeaking ? [1, 1.05, 1] : 1, 
+                      opacity: 1 
+                    }}
+                    transition={{ 
+                      scale: { duration: 0.5, repeat: isSpeaking ? Infinity : 0 }
+                    }}
+                    className="relative z-10 flex flex-col items-center"
+                  >
+                    {/* Avatar circle with state-based styling */}
+                    <div className={cn(
+                      "h-32 w-32 rounded-full flex items-center justify-center shadow-2xl mb-6 transition-all duration-300",
+                      isProcessing ? "bg-gradient-to-br from-yellow-500 to-orange-600 ring-4 ring-yellow-400/50" :
+                      isSpeaking ? "bg-gradient-to-br from-green-500 to-emerald-600 ring-4 ring-green-400/50 animate-pulse" :
+                      isTalking ? "bg-gradient-to-br from-blue-500 to-purple-600 ring-4 ring-blue-400/50 animate-pulse" :
+                      "bg-gradient-to-br from-blue-500 to-purple-600"
+                    )}>
+                      {isProcessing ? (
+                        <div className="flex space-x-1">
+                          <div className="w-3 h-3 bg-white rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+                          <div className="w-3 h-3 bg-white rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+                          <div className="w-3 h-3 bg-white rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+                        </div>
+                      ) : isSpeaking ? (
+                        <div className="flex items-end space-x-1 h-10">
+                          <div className="w-2 bg-white rounded-full animate-pulse" style={{ height: "60%", animationDelay: "0ms" }} />
+                          <div className="w-2 bg-white rounded-full animate-pulse" style={{ height: "100%", animationDelay: "100ms" }} />
+                          <div className="w-2 bg-white rounded-full animate-pulse" style={{ height: "40%", animationDelay: "200ms" }} />
+                          <div className="w-2 bg-white rounded-full animate-pulse" style={{ height: "80%", animationDelay: "300ms" }} />
+                          <div className="w-2 bg-white rounded-full animate-pulse" style={{ height: "50%", animationDelay: "400ms" }} />
+                        </div>
+                      ) : (
+                        <Activity className={cn("h-16 w-16 text-white", isTalking && "animate-bounce")} />
+                      )}
+                    </div>
+                    
+                    <h2 className="text-white text-2xl font-bold mb-2">ClinSync AI</h2>
+                    <p className="text-blue-300 text-sm mb-1">Your Medical Assistant</p>
+                    
+                    {/* State badge */}
+                    <Badge 
+                      variant={isProcessing ? "default" : isSpeaking ? "default" : isTalking ? "default" : "secondary"} 
+                      className={cn(
+                        "mt-2 transition-all",
+                        isProcessing && "bg-yellow-500 hover:bg-yellow-600",
+                        isSpeaking && "bg-green-500 hover:bg-green-600"
+                      )}
+                    >
+                      {isProcessing ? "🔄 Processing..." : 
+                       isSpeaking ? "🔊 Speaking..." : 
+                       isTalking ? "🎤 Listening..." : 
+                       "✨ Ready to help"}
+                    </Badge>
+                  </motion.div>
+                </div>
+                
+                {/* AI Overlay Badges */}
                 {overlayItems.map((finding) => (
                   <motion.div
                     key={finding.label}
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
-                    className={cn("absolute", finding.position)}
+                    className={cn("absolute z-20", finding.position)}
                   >
                     <Badge variant={finding.variant as "default" | "secondary" | "destructive" | "outline"}>
                       {finding.label}
@@ -280,14 +409,29 @@ export default function ConsultationVideoPage() {
                     </Badge>
                   </motion.div>
                 ))}
-                <div className="absolute bottom-4 right-4 h-32 w-44 overflow-hidden rounded-lg border-2 border-border bg-muted">
+                
+                {/* User Camera - Small Picture-in-Picture (Bottom Right) */}
+                <div className="absolute bottom-4 right-4 h-36 w-48 overflow-hidden rounded-xl border-2 border-white/20 bg-black shadow-2xl z-20">
                   <video
                     ref={localVideoRef}
                     autoPlay
                     playsInline
                     muted
-                    className={cn("h-full w-full object-cover", blurBackground && "blur-sm")}
+                    className={cn(
+                      "h-full w-full object-cover",
+                      blurBackground && "blur-sm",
+                      cameraOff && "hidden"
+                    )}
                   />
+                  {cameraOff && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-800">
+                      <VideoOff className="h-8 w-8 text-white/60 mb-1" />
+                      <p className="text-white/60 text-xs">Camera off</p>
+                    </div>
+                  )}
+                  <div className="absolute bottom-1 left-1">
+                    <Badge variant="secondary" className="text-[10px] px-1.5 py-0.5">You</Badge>
+                  </div>
                 </div>
               </div>
               <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border bg-muted/40 p-3">
@@ -322,9 +466,9 @@ export default function ConsultationVideoPage() {
                     {cameraOff ? <VideoOff className="h-4 w-4" /> : <Video className="h-4 w-4" />}
                   </Button>
                   <Button variant="outline" onClick={() => setBlurBackground((b) => !b)}>Blur</Button>
-                  <Button variant="destructive" asChild>
-                    <Link href="/dashboard">End call</Link>
-                  </Button>
+                  <Link href="/dashboard" onClick={endCall}>
+                    <Button variant="destructive">End call</Button>
+                  </Link>
                 </div>
               </div>
             </CardContent>

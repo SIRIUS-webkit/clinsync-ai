@@ -76,32 +76,69 @@ class AIOrchestrator:
         has_audio = audio_bytes is not None
 
         logger.info(
-            "Processing request - text: %s, image: %s, audio: %s",
+            "Processing request - text: %s, image: %s, audio: %s, mode: %s",
             bool(sanitized_text),
             has_image,
             has_audio,
+            mode,
         )
+
+        # For VOICE mode: Transcribe audio FIRST, then decide if image analysis is needed
+        # This dramatically speeds up simple voice queries
+        transcript_result = {}
+        audio_analysis_result = {}
+
+        if has_audio:
+            # Always transcribe audio first (relatively fast)
+            try:
+                transcript_result = await self._analyze_audio_transcription(audio_bytes)
+                logger.info(
+                    "Transcription: %s", transcript_result.get("text", "")[:100]
+                )
+            except Exception as e:
+                logger.error("Transcription failed: %s", e)
+                transcript_result = {"error": str(e)}
+
+        # Get the user's input text (from direct text or transcription)
+        user_input = (
+            sanitized_text
+            or (
+                transcript_result.get("text")
+                if isinstance(transcript_result, dict)
+                else None
+            )
+            or ""
+        )
+
+        # For voice mode: Check if the query actually needs image analysis
+        needs_image = False
+        if mode == "voice" and has_image and user_input:
+            needs_image = self._query_needs_visual_analysis(user_input)
+            logger.info("Voice mode - needs image analysis: %s", needs_image)
+        elif mode == "chat":
+            # Chat mode always analyzes image if present
+            needs_image = has_image
 
         # Get routing decision from Ollama
         try:
             routing = await self._ollama.route_decision(
                 sanitized_text,
-                has_image=has_image,
+                has_image=needs_image,  # Only route to image if actually needed
                 has_audio=has_audio,
             )
             logger.info("Routing decision: %s", routing)
         except Exception as e:
             logger.error("Routing failed, using fallback: %s", e)
-            routing = self._fallback_routing(has_image, has_audio)
+            routing = self._fallback_routing(needs_image, has_audio)
 
-        # Execute model calls based on routing
+        # Execute remaining model calls based on routing (skip audio transcription, already done)
         tasks = {}
 
-        if routing.get("analyze_image") and image_bytes:
-            tasks["image"] = self._analyze_image(image_bytes, sanitized_text)
+        if routing.get("analyze_image") and needs_image and image_bytes:
+            tasks["image"] = self._analyze_image(image_bytes, user_input)
 
-        if routing.get("analyze_audio") and audio_bytes:
-            tasks["transcript"] = self._analyze_audio_transcription(audio_bytes)
+        # Audio biomarkers (optional, can be skipped for speed in voice mode)
+        if mode != "voice" and routing.get("analyze_audio") and audio_bytes:
             tasks["audio_analysis"] = self._analyze_audio_biomarkers(audio_bytes)
 
         # Gather results
@@ -119,19 +156,9 @@ class AIOrchestrator:
 
         # Extract individual results
         image_result = results.get("image", {})
-        transcript_result = results.get("transcript", {})
-        audio_analysis_result = results.get("audio_analysis", {})
-
-        # Get the user's input text (from direct text or transcription)
-        user_input = (
-            sanitized_text
-            or (
-                transcript_result.get("text")
-                if isinstance(transcript_result, dict)
-                else None
-            )
-            or ""
-        )
+        # audio_analysis might come from async tasks (chat mode) or be empty (voice mode)
+        if "audio_analysis" in results:
+            audio_analysis_result = results["audio_analysis"]
 
         # Classify intent to route appropriately
         intent = await self._classify_intent(user_input)
@@ -246,6 +273,123 @@ class AIOrchestrator:
             },
             "routing": {"intent": "medical", **routing},
         }
+
+    def _query_needs_visual_analysis(self, text: str) -> bool:
+        """
+        Determine if a voice query requires visual/image analysis.
+        This is a fast heuristic to skip expensive image analysis for simple questions.
+
+        Returns True if the query mentions visual symptoms or asks to look at something.
+        """
+        if not text:
+            return False
+
+        text_lower = text.lower()
+
+        # Keywords that indicate the user wants visual analysis
+        visual_keywords = [
+            # Direct requests to look
+            "look at",
+            "can you see",
+            "do you see",
+            "what do you see",
+            "show you",
+            "look here",
+            "check this",
+            "see this",
+            "take a look",
+            "have a look",
+            # Visual symptoms
+            "skin",
+            "rash",
+            "redness",
+            "swelling",
+            "swollen",
+            "bump",
+            "bruise",
+            "cut",
+            "wound",
+            "sore",
+            "lesion",
+            "blister",
+            "mole",
+            "spot",
+            "mark",
+            "discoloration",
+            "pimple",
+            "acne",
+            "eye",
+            "eyes",
+            "red eye",
+            "pink eye",
+            "throat",
+            "tongue",
+            "mouth",
+            # Body parts that might need visual inspection
+            "arm",
+            "leg",
+            "hand",
+            "foot",
+            "face",
+            "neck",
+            "back",
+            "finger",
+            "toe",
+            "nail",
+            # X-ray / scan references
+            "x-ray",
+            "xray",
+            "scan",
+            "image",
+            "photo",
+            "picture",
+            "ct scan",
+            "mri",
+        ]
+
+        for keyword in visual_keywords:
+            if keyword in text_lower:
+                logger.info("Query needs visual analysis due to keyword: '%s'", keyword)
+                return True
+
+        # Common symptom queries that DON'T need image analysis
+        non_visual_patterns = [
+            "headache",
+            "fever",
+            "cold",
+            "flu",
+            "cough",
+            "tired",
+            "nausea",
+            "dizzy",
+            "stomach ache",
+            "diarrhea",
+            "constipation",
+            "back pain",
+            "muscle pain",
+            "anxiety",
+            "stress",
+            "sleep",
+            "medicine for",
+            "what should i take",
+            "treatment for",
+            "how to treat",
+            "remedy for",
+            "cure for",
+        ]
+
+        for pattern in non_visual_patterns:
+            if pattern in text_lower:
+                logger.info("Query is non-visual due to pattern: '%s'", pattern)
+                return False
+
+        # Default: If query is short and doesn't mention visual things, skip image
+        if len(text.split()) <= 15:
+            logger.info("Short query without visual keywords - skipping image analysis")
+            return False
+
+        # For longer/ambiguous queries, analyze image to be safe
+        return True
 
     async def _classify_intent(self, text: str) -> str:
         """
