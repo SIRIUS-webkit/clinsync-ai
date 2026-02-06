@@ -27,6 +27,7 @@ dependencies = [
   "pillow",
   "opencv-python",
   "firebase-admin",
+  "tensorflow",  # Required for Derm Foundation (HAI-DEF)
 ]
 
 [dependency-groups]

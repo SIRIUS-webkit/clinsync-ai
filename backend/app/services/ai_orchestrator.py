@@ -16,6 +16,10 @@ from app.models.hear_wrapper import HeARWrapper
 from app.models.medasr_wrapper import MedASRWrapper
 from app.models.medgemma_wrapper import MedGemmaWrapper
 from app.models.ollama_orchestrator import OllamaOrchestrator
+from app.models.derm_foundation_wrapper import (
+    DermFoundationWrapper,
+    get_derm_foundation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +41,9 @@ class AIOrchestrator:
         self._hear = HeARWrapper(settings)
         self._ollama = OllamaOrchestrator(settings)
         self._anonymizer = Anonymizer(settings.anonymization_salt)
+
+        # Derm Foundation for skin analysis (HAI-DEF model)
+        self._derm_foundation = get_derm_foundation(use_gpu=(settings.device == "cuda"))
 
     def _load_image(self, image_bytes: bytes) -> Image.Image:
         """Load image from bytes with error handling."""
@@ -131,10 +138,18 @@ class AIOrchestrator:
             logger.error("Routing failed, using fallback: %s", e)
             routing = self._fallback_routing(needs_image, has_audio)
 
+        # Check if this is a skin-related query for specialized analysis
+        is_skin_related = self._is_skin_query(user_input)
+        if is_skin_related:
+            logger.info("Detected skin-related query, will use Derm Foundation model")
+
         # Execute remaining model calls based on routing (skip audio transcription, already done)
         tasks = {}
 
         if routing.get("analyze_image") and needs_image and image_bytes:
+            # Use Derm Foundation for skin-related queries, MedGemma for general medical images
+            if is_skin_related:
+                tasks["skin_analysis"] = self._analyze_skin(image_bytes, user_input)
             tasks["image"] = self._analyze_image(image_bytes, user_input)
 
         # Audio biomarkers (optional, can be skipped for speed in voice mode)
@@ -156,9 +171,17 @@ class AIOrchestrator:
 
         # Extract individual results
         image_result = results.get("image", {})
+        skin_analysis_result = results.get("skin_analysis", {})
         # audio_analysis might come from async tasks (chat mode) or be empty (voice mode)
         if "audio_analysis" in results:
             audio_analysis_result = results["audio_analysis"]
+
+        # Log skin analysis if available
+        if skin_analysis_result.get("success"):
+            logger.info(
+                "Skin analysis found conditions: %s",
+                [c["condition"] for c in skin_analysis_result.get("conditions", [])],
+            )
 
         # Classify intent to route appropriately
         intent = await self._classify_intent(user_input)
@@ -212,19 +235,28 @@ class AIOrchestrator:
                 user_input=user_input,
                 image_result=image_result,
                 audio_analysis=audio_analysis_result,
+                skin_analysis=skin_analysis_result,  # Pass skin analysis
             )
             logger.info("Voice response: %s", final_response)
+
+            # Include skin analysis in response if available
+            skin_conditions = []
+            if skin_analysis_result.get("success"):
+                skin_conditions = skin_analysis_result.get("conditions", [])
 
             return {
                 "response": final_response,
                 "triage_level": self._determine_triage(
-                    image_result, audio_analysis_result
+                    image_result, audio_analysis_result, skin_analysis_result
                 ),
                 "findings": [],  # Not shown in voice mode
                 "confidence": self._calculate_confidence(
                     image_result, audio_analysis_result
                 ),
-                "recommendations": [],
+                "recommendations": skin_analysis_result.get("recommendations", []),
+                "skin_analysis": skin_conditions,  # Include skin conditions
+                "models_used": ["medgemma"]
+                + (["derm-foundation"] if skin_conditions else []),
                 "transcript": (
                     transcript_result.get("text")
                     if isinstance(transcript_result, dict)
@@ -391,6 +423,98 @@ class AIOrchestrator:
         # For longer/ambiguous queries, analyze image to be safe
         return True
 
+    def _is_skin_query(self, text: str) -> bool:
+        """
+        Determine if a query is specifically about skin conditions.
+        Used to route to Derm Foundation model for specialized analysis.
+        """
+        if not text:
+            return False
+
+        text_lower = text.lower()
+
+        skin_keywords = [
+            # Skin-specific conditions
+            "skin",
+            "rash",
+            "mole",
+            "spot",
+            "bump",
+            "pimple",
+            "acne",
+            "eczema",
+            "psoriasis",
+            "dermatitis",
+            "hives",
+            "urticaria",
+            "melanoma",
+            "lesion",
+            "blister",
+            "wart",
+            "birthmark",
+            "freckle",
+            "discoloration",
+            "pigmentation",
+            # Skin symptoms
+            "itchy",
+            "itching",
+            "scaly",
+            "flaky",
+            "peeling",
+            "dry skin",
+            "oily skin",
+            "red patch",
+            "dark spot",
+            "white patch",
+            "skin irritation",
+            "skin infection",
+            "skin cancer",
+            # Skin-related actions
+            "check my skin",
+            "look at my skin",
+            "skin problem",
+            "what is this on my skin",
+            "skin condition",
+        ]
+
+        for keyword in skin_keywords:
+            if keyword in text_lower:
+                return True
+
+        return False
+
+    async def _analyze_skin(self, image_bytes: bytes, context: str) -> Dict[str, Any]:
+        """
+        Analyze skin image using Derm Foundation model (HAI-DEF).
+
+        This provides specialized dermatology analysis using embeddings
+        from Google's pre-trained dermatology model.
+        """
+        try:
+            image = self._load_image(image_bytes)
+            result = await self._derm_foundation.analyze_skin(image, context)
+
+            if result.get("success"):
+                logger.info(
+                    "Derm Foundation analysis completed: %s conditions detected",
+                    len(result.get("conditions", [])),
+                )
+            else:
+                logger.warning(
+                    "Derm Foundation analysis failed: %s", result.get("error")
+                )
+
+            return result
+
+        except Exception as e:
+            logger.error("Skin analysis failed: %s", e)
+            return {
+                "success": False,
+                "error": str(e),
+                "conditions": [],
+                "recommendations": ["Unable to analyze image. Please try again."],
+            }
+
     async def _classify_intent(self, text: str) -> str:
         """
         Classify user intent using rule-based + LLM approach.
@@ -400,6 +524,78 @@ class AIOrchestrator:
             return "medical"  # Default to medical if no text (likely image/audio only)
 
         text_lower = text.lower().strip()
+
+        # Medical keywords that indicate health-related query - CHECK FIRST!
+        medical_keywords = [
+            # Symptoms
+            "pain",
+            "hurt",
+            "ache",
+            "fever",
+            "cough",
+            "sick",
+            "symptom",
+            "headache",
+            "stomach",
+            "chest",
+            "breathing",
+            "heart",
+            "skin",
+            "rash",
+            "infection",
+            "allergy",
+            "injury",
+            "broken",
+            "swollen",
+            "bleeding",
+            "nausea",
+            "dizzy",
+            "fatigue",
+            "tired",
+            "sleep",
+            "appetite",
+            # Medical terms
+            "diagnosis",
+            "medicine",
+            "medication",
+            "treatment",
+            "doctor",
+            "hospital",
+            "disease",
+            "health",
+            "medical",
+            "prescription",
+            # Imaging / tests - IMPORTANT for image analysis!
+            "x-ray",
+            "xray",
+            "x ray",
+            "scan",
+            "mri",
+            "ct",
+            "ultrasound",
+            "blood",
+            "test",
+            "result",
+            "report",
+            "image",
+            "photo",
+            # Actions that indicate medical inquiry
+            "check",
+            "analyze",
+            "look at",
+            "examine",
+            "assess",
+            "evaluate",
+            "what is this",
+            "what's this",
+            "what does this show",
+        ]
+
+        # Check for medical keywords FIRST (before greetings)
+        for keyword in medical_keywords:
+            if keyword in text_lower:
+                logger.debug("Medical intent detected due to keyword: '%s'", keyword)
+                return "medical"
 
         # Rule-based detection for common patterns (fast path)
         greeting_patterns = [
@@ -424,66 +620,6 @@ class AIOrchestrator:
             for pattern in greeting_patterns:
                 if pattern in text_lower:
                     return "greeting"
-
-        # Medical keywords that indicate health-related query
-        medical_keywords = [
-            "pain",
-            "hurt",
-            "ache",
-            "fever",
-            "cough",
-            "sick",
-            "symptom",
-            "diagnosis",
-            "medicine",
-            "medication",
-            "treatment",
-            "doctor",
-            "hospital",
-            "disease",
-            "health",
-            "medical",
-            "prescription",
-            "x-ray",
-            "scan",
-            "blood",
-            "test",
-            "headache",
-            "stomach",
-            "chest",
-            "breathing",
-            "heart",
-            "skin",
-            "rash",
-            "infection",
-            "allergy",
-            "injury",
-            "broken",
-            "swollen",
-            "bleeding",
-            "nausea",
-            "dizzy",
-            "fatigue",
-            "tired",
-            "sleep",
-            "appetite",
-            "weight",
-            "temperature",
-            "pulse",
-            "pressure",
-            "oxygen",
-            "diabetes",
-            "cancer",
-            "surgery",
-            "operation",
-            "therapy",
-            "vaccine",
-            "immunization",
-        ]
-
-        for keyword in medical_keywords:
-            if keyword in text_lower:
-                return "medical"
 
         # For ambiguous cases, use LLM to classify (slow path)
         try:
@@ -555,6 +691,7 @@ class AIOrchestrator:
         user_input: str,
         image_result: Dict,
         audio_analysis: Optional[Dict],
+        skin_analysis: Optional[Dict] = None,
     ) -> str:
         """
         Synthesize a conversational response for real-time voice consultation.
@@ -565,6 +702,24 @@ class AIOrchestrator:
 
         if user_input:
             context_parts.append(f'Patient says: "{user_input}"')
+
+        # Include skin analysis from Derm Foundation if available
+        if skin_analysis and skin_analysis.get("success"):
+            conditions = skin_analysis.get("conditions", [])
+            if conditions:
+                skin_findings = []
+                for cond in conditions[:2]:  # Limit to top 2 conditions
+                    skin_findings.append(
+                        f"{cond['condition']} ({cond['confidence']*100:.0f}% confidence, {cond['severity']} severity)"
+                    )
+                context_parts.append(
+                    f"Derm Foundation skin analysis: {'; '.join(skin_findings)}"
+                )
+                # Include recommendation
+                if conditions[0].get("recommendation"):
+                    context_parts.append(
+                        f"Dermatology recommendation: {conditions[0]['recommendation']}"
+                    )
 
         # Only mention image if there are meaningful findings
         if image_result and "findings" in image_result:
@@ -771,6 +926,7 @@ Now respond to the patient:"""
         self,
         image_result: Dict,
         audio_analysis: Optional[Dict],
+        skin_analysis: Optional[Dict] = None,
     ) -> str:
         """Determine triage level from model outputs."""
         # Check image severity
@@ -787,10 +943,23 @@ Now respond to the patient:"""
                 elif biomarkers.get("breathing", {}).get("wheezing_detected"):
                     audio_risk = "moderate"
 
+        # Check skin analysis from Derm Foundation
+        skin_risk = "low"
+        if skin_analysis and skin_analysis.get("success"):
+            skin_triage = skin_analysis.get("triage_level", "LOW").upper()
+            if skin_triage == "HIGH":
+                skin_risk = "high"
+            elif skin_triage == "MODERATE":
+                skin_risk = "moderate"
+
         # Return highest severity
-        if "urgent" in [image_severity] or audio_risk == "high":
+        if "urgent" in [image_severity] or audio_risk == "high" or skin_risk == "high":
             return "HIGH"
-        elif image_severity == "moderate" or audio_risk == "moderate":
+        elif (
+            image_severity == "moderate"
+            or audio_risk == "moderate"
+            or skin_risk == "moderate"
+        ):
             return "MODERATE"
         return "LOW"
 

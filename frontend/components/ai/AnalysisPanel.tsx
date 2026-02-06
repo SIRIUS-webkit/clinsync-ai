@@ -92,6 +92,54 @@ export function AnalysisPanel() {
     toast.success("FHIR export ready.");
   };
 
+  const exportSOAP = async () => {
+    try {
+      // Build findings and recommendations for API
+      const findingsForApi = findings.length > 0 ? findings : findingsToRender.map((f) => f.label);
+      const recommendationsForApi = recommendations.length > 0 
+        ? recommendations 
+        : recommendationsToRender.map((r) => r.label);
+
+      // Create form data for the SOAP endpoint
+      const formData = new FormData();
+      formData.append("patient_id", "anonymous");
+      formData.append("consultation_type", "video");
+      formData.append("response_text", response || "Video consultation analysis");
+      formData.append("findings", JSON.stringify(findingsForApi));
+      formData.append("recommendations", JSON.stringify(recommendationsForApi));
+      formData.append("triage_level", triageLevel);
+      formData.append("transcript", ""); 
+      formData.append("format", "text");
+
+      const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const fetchResponse = await fetch(`${API_URL}/chat/soap/download`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!fetchResponse.ok) {
+        throw new Error("Failed to generate SOAP note");
+      }
+
+      // Get the blob and trigger download
+      const blob = await fetchResponse.blob();
+      const noteId = fetchResponse.headers.get("X-Note-ID") || "soap-note";
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${noteId}.txt`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      
+      toast.success("SOAP note downloaded successfully!");
+    } catch (error) {
+      console.error("SOAP export failed:", error);
+      toast.error("Failed to download SOAP note");
+    }
+  };
+
   return (
     <Card className="h-full">
       <CardHeader className="flex flex-row items-center justify-between">
@@ -183,7 +231,17 @@ export function AnalysisPanel() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <Button className="flex-1" onClick={exportFHIR} aria-label="Export analysis to FHIR format">
+          <Button 
+            className="flex-1 bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700" 
+            onClick={exportSOAP} 
+            aria-label="Download SOAP Note"
+          >
+            <FileDown className="mr-2 h-4 w-4" aria-hidden />
+            Download SOAP Note
+          </Button>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 mt-2">
+          <Button className="flex-1" variant="outline" onClick={exportFHIR} aria-label="Export analysis to FHIR format">
             <FileDown className="mr-2 h-4 w-4" aria-hidden />
             Export to FHIR
           </Button>

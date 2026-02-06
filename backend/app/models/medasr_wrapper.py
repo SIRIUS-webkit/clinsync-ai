@@ -85,9 +85,32 @@ class MedASRWrapper:
         self._ensure_loaded()
         if self._pipeline is None:
             raise RuntimeError("MedASR pipeline failed to load.")
+
         audio_array, _ = self._decode_audio(audio_bytes)
+
+        # Check if audio is too short or silent
+        if len(audio_array) < 1600:  # Less than 0.1 seconds at 16kHz
+            logger.warning(
+                "Audio too short for transcription: %d samples", len(audio_array)
+            )
+            return ""
+
+        # Check if audio is mostly silence
+        if np.max(np.abs(audio_array)) < 0.01:
+            logger.warning("Audio appears to be silence")
+            return ""
+
         result = self._pipeline(audio_array)
-        return result.get("text", "").strip()
+        text = result.get("text", "").strip()
+
+        # Clean up any epsilon tokens (from models like MedASR)
+        import re
+
+        text = re.sub(r"<epsilon>", "", text)
+        text = re.sub(r"\s+", " ", text).strip()
+
+        logger.info("Transcription result: '%s'", text[:100] if text else "(empty)")
+        return text
 
     def transcribe_stream(self, audio_bytes: bytes) -> List[str]:
         """Transcribe audio in streaming chunks."""

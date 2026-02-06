@@ -19,6 +19,8 @@ type AIPanelProps = {
   confidence: number;
   isConnected: boolean;
   onExportFHIR?: () => void;
+  onExportSOAP?: () => void;
+  transcript?: string;
 };
 
 const triageColors: Record<string, string> = {
@@ -44,6 +46,8 @@ export function AIPanel({
   confidence,
   isConnected,
   onExportFHIR,
+  onExportSOAP,
+  transcript,
 }: AIPanelProps) {
   const [findingsOpen, setFindingsOpen] = React.useState(true);
   const [differentialOpen, setDifferentialOpen] = React.useState(true);
@@ -187,6 +191,15 @@ export function AIPanel({
         <ScrollArea className="min-h-0 flex-1" />
 
         <div className="flex flex-col gap-2 border-t border-border pt-4">
+          <Button
+            variant="default"
+            size="sm"
+            className="w-full justify-start bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700"
+            onClick={onExportSOAP}
+          >
+            <FileDown className="mr-2 h-4 w-4" />
+            Download SOAP Note
+          </Button>
           <Button
             variant="outline"
             size="sm"

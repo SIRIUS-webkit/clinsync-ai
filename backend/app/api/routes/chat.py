@@ -610,3 +610,200 @@ async def get_room_state(request: Request, room_id: str) -> dict:
         "room_id": room.room_id,
         "peers": list(room.peers),
     }
+
+
+# ============================================================================
+# SOAP NOTE GENERATION ENDPOINTS
+# ============================================================================
+
+
+class SOAPNoteRequest(BaseModel):
+    """Request model for SOAP note generation."""
+
+    patient_id: str
+    consultation_type: str = "chat"  # "chat" | "video" | "general"
+    consultation_data: dict  # Full consultation data
+
+
+class SOAPNoteResponse(BaseModel):
+    """Response model for SOAP note."""
+
+    success: bool
+    note_id: str
+    soap_note: dict
+    text_format: str  # Human-readable text version
+
+
+@router.post("/soap/generate", response_model=SOAPNoteResponse)
+async def generate_soap_note(request: SOAPNoteRequest) -> SOAPNoteResponse:
+    """
+    Generate a SOAP note from consultation data.
+
+    This endpoint creates a structured clinical note following the SOAP format:
+    - Subjective: Patient-reported symptoms
+    - Objective: Clinical observations and test results
+    - Assessment: Diagnosis and interpretation
+    - Plan: Recommendations and follow-up
+    """
+    from app.services.soap_generator import get_soap_generator
+
+    try:
+        generator = get_soap_generator()
+        soap_note = generator.generate_soap_note(
+            patient_id=request.patient_id,
+            consultation_data=request.consultation_data,
+            consultation_type=request.consultation_type,
+        )
+        text_format = generator.to_text(soap_note)
+
+        return SOAPNoteResponse(
+            success=True,
+            note_id=soap_note["note_id"],
+            soap_note=soap_note,
+            text_format=text_format,
+        )
+    except Exception as e:
+        logger.error("SOAP note generation failed: %s", e)
+        raise HTTPException(
+            status_code=500, detail=f"Failed to generate SOAP note: {str(e)}"
+        )
+
+
+@router.get("/soap/download/{note_id}")
+async def download_soap_note(
+    note_id: str,
+    format: str = "text",  # "text" | "json"
+    patient_id: str = "anonymous",
+    consultation_data: Optional[str] = None,  # JSON string
+) -> StreamingResponse:
+    """
+    Download a SOAP note in the specified format.
+
+    For demo purposes, this regenerates the note from provided data.
+    In production, you would store and retrieve notes from a database.
+    """
+    from app.services.soap_generator import get_soap_generator
+    import io
+
+    try:
+        generator = get_soap_generator()
+
+        # Parse consultation data if provided
+        data = {}
+        if consultation_data:
+            data = json.loads(consultation_data)
+
+        # Generate SOAP note
+        soap_note = generator.generate_soap_note(
+            patient_id=patient_id,
+            consultation_data=data,
+            consultation_type="general",
+        )
+
+        if format == "json":
+            content = generator.to_json(soap_note, pretty=True)
+            media_type = "application/json"
+            filename = f"{note_id}.json"
+        else:
+            content = generator.to_text(soap_note)
+            media_type = "text/plain"
+            filename = f"{note_id}.txt"
+
+        # Create streaming response
+        return StreamingResponse(
+            io.BytesIO(content.encode("utf-8")),
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}",
+                "X-Note-ID": note_id,
+            },
+        )
+    except Exception as e:
+        logger.error("SOAP note download failed: %s", e)
+        raise HTTPException(
+            status_code=500, detail=f"Failed to download SOAP note: {str(e)}"
+        )
+
+
+@router.post("/soap/download")
+async def download_soap_note_post(
+    request: Request,
+    patient_id: str = Form("anonymous"),
+    consultation_type: str = Form("chat"),
+    response_text: str = Form(""),
+    findings: str = Form("[]"),  # JSON array
+    recommendations: str = Form("[]"),  # JSON array
+    triage_level: str = Form("LOW"),
+    transcript: str = Form(""),
+    format: str = Form("text"),
+) -> StreamingResponse:
+    """
+    Generate and download a SOAP note from form data.
+
+    This is the main endpoint for downloading consultation summaries.
+    """
+    from app.services.soap_generator import get_soap_generator
+    import io
+
+    try:
+        generator = get_soap_generator()
+
+        # Parse JSON fields
+        try:
+            findings_list = json.loads(findings) if findings else []
+        except json.JSONDecodeError:
+            findings_list = []
+
+        try:
+            recommendations_list = (
+                json.loads(recommendations) if recommendations else []
+            )
+        except json.JSONDecodeError:
+            recommendations_list = []
+
+        # Build consultation data
+        consultation_data = {
+            "response_text": response_text,
+            "response": response_text,
+            "findings": findings_list,
+            "recommendations": recommendations_list,
+            "triage_level": triage_level,
+            "transcript": transcript,
+            "user_input": transcript,
+            "models_used": ["medgemma"],
+        }
+
+        # Generate SOAP note
+        soap_note = generator.generate_soap_note(
+            patient_id=patient_id,
+            consultation_data=consultation_data,
+            consultation_type=consultation_type,
+        )
+
+        note_id = soap_note["note_id"]
+
+        if format == "json":
+            content = generator.to_json(soap_note, pretty=True)
+            media_type = "application/json"
+            filename = f"{note_id}.json"
+        else:
+            content = generator.to_text(soap_note)
+            media_type = "text/plain"
+            filename = f"{note_id}.txt"
+
+        logger.info("Generated downloadable SOAP note: %s", note_id)
+
+        # Create streaming response
+        return StreamingResponse(
+            io.BytesIO(content.encode("utf-8")),
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}",
+                "X-Note-ID": note_id,
+            },
+        )
+    except Exception as e:
+        logger.error("SOAP note download failed: %s", e)
+        raise HTTPException(
+            status_code=500, detail=f"Failed to generate SOAP note: {str(e)}"
+        )

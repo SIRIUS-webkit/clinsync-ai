@@ -22,7 +22,8 @@ class Settings(BaseSettings):
     cors_allow_origins: List[str] = ["*"]
 
     medgemma_model_id: str = "google/medgemma-4b-it"
-    medasr_model_id: str = "google/medasr"
+    # Use Whisper for reliable speech recognition (MedASR outputs <epsilon> for some audio formats)
+    medasr_model_id: str = "openai/whisper-small"
     hear_model_id: str = "google/hear"
 
     # LLM backend: "ollama", "huggingface", or "auto" (tries ollama first, falls back to hf)

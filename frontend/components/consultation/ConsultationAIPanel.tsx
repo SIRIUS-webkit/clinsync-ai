@@ -54,6 +54,59 @@ export function ConsultationAIPanel({ mode, className }: ConsultationAIPanelProp
     toast.success("FHIR export downloaded.");
   }, [chatFindings, triageLevel, confidence]);
 
+  const handleExportSOAP = React.useCallback(async () => {
+    try {
+      // Get the last response text from messages
+      const messages = useChatStore.getState().messages;
+      const lastAssistantMessage = messages
+        .filter((m) => m.role === "assistant")
+        .pop();
+      const responseText = lastAssistantMessage?.content || "";
+
+      // Build findings for API
+      const findingsForApi = chatFindings.map((f) => f.label);
+      const recommendationsForApi = chatActions.map((a) => a.text);
+
+      // Create form data for the SOAP endpoint
+      const formData = new FormData();
+      formData.append("patient_id", "anonymous");
+      formData.append("consultation_type", "chat");
+      formData.append("response_text", responseText);
+      formData.append("findings", JSON.stringify(findingsForApi));
+      formData.append("recommendations", JSON.stringify(recommendationsForApi));
+      formData.append("triage_level", triageLevel);
+      formData.append("transcript", ""); // Could store user messages
+      formData.append("format", "text");
+
+      const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const response = await fetch(`${API_URL}/chat/soap/download`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to generate SOAP note");
+      }
+
+      // Get the blob and trigger download
+      const blob = await response.blob();
+      const noteId = response.headers.get("X-Note-ID") || "soap-note";
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${noteId}.txt`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      
+      toast.success("SOAP note downloaded successfully!");
+    } catch (error) {
+      console.error("SOAP export failed:", error);
+      toast.error("Failed to download SOAP note");
+    }
+  }, [chatFindings, chatActions, triageLevel]);
+
   return (
     <div
       className={cn(
@@ -88,6 +141,7 @@ export function ConsultationAIPanel({ mode, className }: ConsultationAIPanelProp
               confidence={confidence}
               isConnected={isConnected}
               onExportFHIR={handleExportFHIR}
+              onExportSOAP={handleExportSOAP}
             />
           ) : (
             <AnalysisPanel />
