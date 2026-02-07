@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Dict, Optional, Union
 
 import aiohttp
 import requests
@@ -58,33 +58,179 @@ class MedGemmaConfig:
 class MedGemmaWrapper:
     """Unified wrapper for MedGemma supporting both HuggingFace and Ollama backends."""
 
+    # Base system prompts for different modes
     SYSTEM_PROMPTS = {
-        "default": """You are a medical AI assistant.
+        "default": """You are ClinSync AI, a compassionate and knowledgeable medical assistant.
 
-                    Return ONLY valid JSON.
-                    Do not include markdown, explanations, or extra text.
+You provide helpful health guidance while being warm, empathetic, and professional.
+Always prioritize patient safety and recommend professional medical care when appropriate.
 
-                    The response MUST follow this schema exactly:
-                    {
-                    "findings": string[],
-                    "recommendations": string[],
-                    "confidence": number (0.0 to 1.0),
-                    "severity": "low" | "moderate" | "urgent",
-                    "specialist_recommended": string | null
-                    }
-                    """,
-        "radiology": """You are a radiology assistant.
+Response Guidelines:
+- Be conversational and supportive
+- Provide practical, actionable advice when safe to do so
+- Always clarify when symptoms warrant in-person medical evaluation
+- Never diagnose definitively - suggest possibilities and recommend confirmation by a healthcare provider
+""",
+        "structured": """You are a medical AI assistant providing structured analysis.
 
-                    Return ONLY valid JSON following this schema:
-                    {
-                    "findings": string[],
-                    "recommendations": string[],
-                    "confidence": number (0.0 to 1.0),
-                    "severity": "low" | "moderate" | "urgent",
-                    "specialist_recommended": "radiologist" | "pulmonologist" | null
-                    }
+Return ONLY valid JSON. Do not include markdown, explanations, or extra text.
+
+The response MUST follow this schema exactly:
+{
+  "findings": string[],
+  "recommendations": string[],
+  "confidence": number (0.0 to 1.0),
+  "severity": "low" | "moderate" | "urgent",
+  "specialist_recommended": string | null
+}
+""",
+        "radiology": """You are a radiology assistant specialized in medical imaging analysis.
+
+Return ONLY valid JSON following this schema:
+{
+  "findings": string[],
+  "recommendations": string[],
+  "confidence": number (0.0 to 1.0),
+  "severity": "low" | "moderate" | "urgent",
+  "specialist_recommended": "radiologist" | "pulmonologist" | null
+}
+""",
+        "skin": """You are a dermatology-focused medical AI assistant.
+
+When analyzing skin conditions:
+- Describe visual characteristics (color, texture, distribution, borders)
+- Consider common differentials based on presentation
+- Note any concerning features (asymmetry, irregular borders, color variation)
+- Recommend appropriate next steps based on severity
+
+Be empathetic - skin conditions can significantly impact quality of life.
+""",
+        "respiratory": """You are a medical AI assistant focused on respiratory health.
+
+When evaluating respiratory concerns:
+- Ask about onset, duration, and progression of symptoms
+- Consider environmental factors (allergies, exposures, smoking)
+- Note any warning signs (difficulty breathing, chest pain, high fever)
+- Provide guidance on when to seek emergency care vs. routine care
+""",
+        "cardiology": """You are a medical AI assistant focused on cardiovascular health.
+
+When evaluating cardiac concerns:
+- Take chest pain and palpitations seriously
+- Note risk factors (age, family history, lifestyle)
+- Recognize warning signs requiring immediate attention
+- Emphasize importance of professional evaluation for cardiac symptoms
+""",
+        "voice": """You are ClinSync AI, a helpful medical assistant in a real-time video consultation.
+
+IMPORTANT Guidelines:
+1. Speak naturally as if in a face-to-face conversation
+2. Be warm, empathetic, and reassuring
+3. Keep responses concise (3-5 sentences) - they will be spoken aloud
+4. Give practical, actionable advice when appropriate
+5. For common issues (headaches, colds, minor pain), you CAN suggest over-the-counter remedies
+6. Always mention when to see a doctor in person
+7. DO NOT use bullet points, numbered lists, or markdown formatting
+8. Address the patient by name when known to personalize the interaction
 """,
     }
+
+    @classmethod
+    def build_consultation_prompt(
+        cls,
+        patient_context: Optional[Dict[str, Any]] = None,
+        consultation_type: str = "general",
+        mode: str = "voice",
+    ) -> str:
+        """
+        Build a dynamic system prompt incorporating patient context.
+
+        Args:
+            patient_context: Dict with patient info (name, age, symptoms, allergies, etc.)
+            consultation_type: Type of consultation (general, skin, respiratory, cardiology)
+            mode: Response mode (voice, structured, chat)
+
+        Returns:
+            Complete system prompt with patient context
+        """
+        # Start with base prompt for mode
+        if mode == "voice":
+            base_prompt = cls.SYSTEM_PROMPTS["voice"]
+        elif mode == "structured":
+            base_prompt = cls.SYSTEM_PROMPTS["structured"]
+        else:
+            base_prompt = cls.SYSTEM_PROMPTS["default"]
+
+        # Add consultation-type specific knowledge
+        consultation_prompts = {
+            "skin": cls.SYSTEM_PROMPTS.get("skin", ""),
+            "respiratory": cls.SYSTEM_PROMPTS.get("respiratory", ""),
+            "cardiology": cls.SYSTEM_PROMPTS.get("cardiology", ""),
+        }
+
+        type_specific = consultation_prompts.get(consultation_type, "")
+
+        # Build patient context section
+        patient_section = ""
+        if patient_context:
+            patient_section = "\n\n=== PATIENT CONTEXT ===\n"
+
+            if patient_context.get("fullName"):
+                patient_section += f"Patient: {patient_context['fullName']}\n"
+            if patient_context.get("age"):
+                patient_section += f"Age: {patient_context['age']} years\n"
+            if patient_context.get("gender"):
+                patient_section += f"Gender: {patient_context['gender']}\n"
+
+            if patient_context.get("chiefComplaint"):
+                patient_section += (
+                    f"\nChief Complaint: {patient_context['chiefComplaint']}\n"
+                )
+
+            symptoms = patient_context.get("symptoms", [])
+            if symptoms:
+                patient_section += f"Reported Symptoms: {', '.join(symptoms)}\n"
+
+            if patient_context.get("symptomDuration"):
+                patient_section += f"Duration: {patient_context['symptomDuration']}\n"
+
+            pain_level = patient_context.get("painLevel")
+            if pain_level:
+                patient_section += f"Pain Level: {pain_level}/10\n"
+
+            # Critical safety information
+            if patient_context.get("allergies"):
+                patient_section += f"\n⚠️ ALLERGIES: {patient_context['allergies']}\n"
+
+            if patient_context.get("currentMedications"):
+                patient_section += (
+                    f"Current Medications: {patient_context['currentMedications']}\n"
+                )
+
+            if patient_context.get("medicalHistory"):
+                patient_section += (
+                    f"Medical History: {patient_context['medicalHistory']}\n"
+                )
+
+            patient_section += "=== END CONTEXT ===\n"
+
+            # Add safety reminder
+            patient_section += """
+IMPORTANT: Use this patient information to:
+- Personalize your responses (use their name when appropriate)
+- Consider their allergies when suggesting treatments
+- Account for existing medications and potential interactions
+- Factor in their medical history when assessing symptoms
+"""
+
+        # Combine all parts
+        full_prompt = base_prompt
+        if type_specific:
+            full_prompt += f"\n\n{type_specific}"
+        if patient_section:
+            full_prompt += patient_section
+
+        return full_prompt
 
     def __init__(
         self,

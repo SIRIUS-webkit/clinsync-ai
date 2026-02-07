@@ -65,6 +65,8 @@ class AIOrchestrator:
         image_bytes: Optional[bytes] = None,
         audio_bytes: Optional[bytes] = None,
         mode: str = "chat",  # "chat" for structured response, "voice" for conversational
+        patient_context: Optional[Dict[str, Any]] = None,  # Patient intake data
+        consultation_type: str = "general",  # skin, respiratory, cardiology, etc.
     ) -> Dict[str, Any]:
         """
         Process a multimodal request and return structured response.
@@ -74,6 +76,8 @@ class AIOrchestrator:
             image_bytes: Optional image data
             audio_bytes: Optional audio data
             mode: Response mode - "chat" (structured) or "voice" (conversational)
+            patient_context: Patient intake data (name, age, symptoms, allergies, etc.)
+            consultation_type: Type of consultation for specialized prompts
 
         Returns:
             Structured dict with response, findings, and metadata
@@ -264,7 +268,9 @@ class AIOrchestrator:
                 user_input=user_input,
                 image_result=image_result,
                 audio_analysis=audio_analysis_result,
-                skin_analysis=skin_analysis_result,  # Pass skin analysis
+                skin_analysis=skin_analysis_result,
+                patient_context=patient_context,
+                consultation_type=consultation_type,
             )
             logger.info("Voice response: %s", final_response)
 
@@ -721,13 +727,30 @@ class AIOrchestrator:
         image_result: Dict,
         audio_analysis: Optional[Dict],
         skin_analysis: Optional[Dict] = None,
+        patient_context: Optional[Dict] = None,
+        consultation_type: str = "general",
     ) -> str:
         """
         Synthesize a conversational response for real-time voice consultation.
         This is designed to be helpful, natural, and suitable for TTS.
+        Uses patient context for personalized responses.
         """
-        # Build context about what we know
+        from app.models.medgemma_wrapper import MedGemmaWrapper
+
+        # Build dynamic system prompt with patient context
+        system_prompt = MedGemmaWrapper.build_consultation_prompt(
+            patient_context=patient_context,
+            consultation_type=consultation_type,
+            mode="voice",
+        )
+
+        # Build conversation context about what we know
         context_parts = []
+
+        # Add patient info summary if available
+        if patient_context:
+            patient_name = patient_context.get("fullName", "the patient")
+            context_parts.append(f"Speaking with: {patient_name}")
 
         if user_input:
             context_parts.append(f'Patient says: "{user_input}"')
@@ -773,24 +796,19 @@ class AIOrchestrator:
             else "No specific context provided."
         )
 
-        prompt = f"""You are ClinSync AI, a helpful medical assistant in a real-time video consultation.
+        # Build the full prompt
+        prompt = f"""{system_prompt}
 
-CONTEXT:
+CURRENT CONVERSATION:
 {context}
 
 INSTRUCTIONS:
 1. Respond as if you're speaking directly to the patient in a video call.
-2. Be warm, empathetic, and reassuring.
-3. Give practical, actionable advice when appropriate.
-4. For common issues (headache, cold, minor pain), you CAN suggest over-the-counter remedies.
-5. Always mention when they should see a doctor in person.
-6. Keep your response concise (3-5 sentences max) - this will be spoken aloud.
-7. DO NOT refuse to help or say you cannot provide medical advice. You ARE providing supportive health guidance.
-8. DO NOT use bullet points, numbered lists, or headers - speak naturally.
-
-Example good responses:
-- "I'm sorry to hear about your headache. For occasional headaches, you can try ibuprofen or acetaminophen following the package directions. Make sure you're staying hydrated and getting enough rest. If the headache persists for more than a few days or is unusually severe, please see a doctor."
-- "Based on what you're describing, it sounds like you might have a mild cold. Rest, fluids, and over-the-counter cold medicine can help with the symptoms. If you develop a high fever or symptoms worsen after a week, it's time to see a healthcare provider."
+2. Use the patient's name naturally when appropriate.
+3. Consider their allergies and current medications when suggesting treatments.
+4. For common issues, you CAN suggest over-the-counter remedies (but check for allergies first!).
+5. Keep your response concise (3-5 sentences max) - this will be spoken aloud.
+6. DO NOT use bullet points, numbered lists, or headers - speak naturally.
 
 Now respond to the patient:"""
 

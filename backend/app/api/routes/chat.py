@@ -527,6 +527,8 @@ async def realtime_voice_ws(websocket: WebSocket) -> None:
     # Session state
     audio_chunks: list[bytes] = []
     current_image_bytes: bytes | None = None
+    patient_context: dict | None = None  # Store patient intake data
+    context_images: list[bytes] = []  # Images from intake form
 
     try:
         # Notify client we're ready
@@ -541,15 +543,35 @@ async def realtime_voice_ws(websocket: WebSocket) -> None:
                 await websocket.send_json({"type": "pong"})
                 continue
 
-            # Handle image context (captured from video feed)
+            # Handle patient context (from intake form)
+            if msg_type == "context":
+                patient_context = payload.get("data", {})
+                logger.info(
+                    "Received patient context: %s, %sy, %s - %s",
+                    patient_context.get("fullName", "Unknown"),
+                    patient_context.get("age", "?"),
+                    patient_context.get("gender", "?"),
+                    patient_context.get("chiefComplaint", "No complaint")[:50],
+                )
+                continue
+
+            # Handle image context (captured from video feed or intake form)
             if msg_type == "image":
                 image_data = payload.get("data")
+                image_type = payload.get("imageType", "live")  # "live" or from intake
                 if image_data:
                     if "," in image_data:
                         image_data = image_data.split(",", 1)[1]
-                    current_image_bytes = base64.b64decode(image_data)
+                    image_bytes = base64.b64decode(image_data)
+
+                    if image_type == "live":
+                        current_image_bytes = image_bytes
+                    else:
+                        # Store intake images for context
+                        context_images.append(image_bytes)
+
                     logger.debug(
-                        "Received image context, %d bytes", len(current_image_bytes)
+                        "Received %s image, %d bytes", image_type, len(image_bytes)
                     )
                 continue
 
@@ -581,12 +603,52 @@ async def realtime_voice_ws(websocket: WebSocket) -> None:
                 await websocket.send_json({"type": "processing"})
 
                 try:
-                    # Process with orchestrator in voice mode
+                    # Build context text from patient intake
+                    context_text = None
+                    if patient_context:
+                        context_parts = []
+                        if patient_context.get("contextPrompt"):
+                            context_parts.append(patient_context["contextPrompt"])
+                        elif patient_context.get("chiefComplaint"):
+                            context_parts.append(
+                                f"Chief complaint: {patient_context['chiefComplaint']}"
+                            )
+                            if patient_context.get("symptoms"):
+                                context_parts.append(
+                                    f"Symptoms: {', '.join(patient_context['symptoms'])}"
+                                )
+                            if patient_context.get("symptomDuration"):
+                                context_parts.append(
+                                    f"Duration: {patient_context['symptomDuration']}"
+                                )
+                            if patient_context.get("painLevel"):
+                                context_parts.append(
+                                    f"Pain level: {patient_context['painLevel']}/10"
+                                )
+                        context_text = (
+                            "\n".join(context_parts) if context_parts else None
+                        )
+
+                    # Combine context image with live image if available
+                    image_to_analyze = current_image_bytes
+                    if not image_to_analyze and context_images:
+                        image_to_analyze = context_images[0]  # Use first intake image
+
+                    # Get consultation type from patient context
+                    consultation_type = (
+                        patient_context.get("consultationType", "general")
+                        if patient_context
+                        else "general"
+                    )
+
+                    # Process with orchestrator in voice mode with full patient context
                     result = await orchestrator.process_request(
-                        text=None,
-                        image_bytes=current_image_bytes,
+                        text=context_text,
+                        image_bytes=image_to_analyze,
                         audio_bytes=full_audio,
                         mode="voice",
+                        patient_context=patient_context,  # Full intake data
+                        consultation_type=consultation_type,
                     )
 
                     response_text = result.get("response", "")

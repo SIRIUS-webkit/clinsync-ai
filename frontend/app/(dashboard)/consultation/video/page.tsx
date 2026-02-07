@@ -7,10 +7,12 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ConsultationAIPanel } from "@/components/consultation/ConsultationAIPanel";
+import { IntakeForm } from "@/components/consultation/IntakeForm";
 import { cn } from "@/lib/utils";
 import toast from "react-hot-toast";
-import { Mic, MicOff, PhoneOff, Video, VideoOff, Activity, Sparkles, Volume2, Wifi, WifiOff } from "lucide-react";
+import { Mic, MicOff, PhoneOff, Video, VideoOff, Activity, Sparkles, Volume2, Wifi, WifiOff, FileText, User } from "lucide-react";
 import { useAnalysisStore } from "@/stores/useAnalysisStore";
+import { useConsultationContext, PatientIntake } from "@/stores/useConsultationContext";
 
 // Connection states
 type ConnectionState = "disconnected" | "connecting" | "connected" | "failed";
@@ -27,6 +29,7 @@ export default function ConsultationVideoPage() {
   const [transcript, setTranscript] = React.useState("");
   const [responseText, setResponseText] = React.useState("");
   const [isClient, setIsClient] = React.useState(false);
+  const [showVideoCall, setShowVideoCall] = React.useState(false);
   
   // Generate session ID only on client to avoid hydration mismatch
   const sessionIdRef = React.useRef<string>("");
@@ -40,11 +43,23 @@ export default function ConsultationVideoPage() {
   
   const setAnalysisData = useAnalysisStore((s) => s.setFromResponse);
   
+  // Get consultation context (patient intake data)
+  const { intake, setIntake, startSession, getSystemPromptContext, addMessage } = useConsultationContext();
+  const hasIntakeData = !!intake;
+  
   // Set client flag after mount to avoid hydration issues
   React.useEffect(() => {
     setIsClient(true);
     sessionIdRef.current = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   }, []);
+  
+  // Handle intake form completion - start video call
+  const handleIntakeComplete = React.useCallback((intakeData: PatientIntake) => {
+    setIntake(intakeData);
+    startSession();
+    setShowVideoCall(true);
+    toast.success("Starting video consultation...");
+  }, [setIntake, startSession]);
 
   // Initialize connection using WebSocket (more reliable than full WebRTC for AI calls)
   const initializeConnection = React.useCallback(async (stream: MediaStream) => {
@@ -63,6 +78,42 @@ export default function ConsultationVideoPage() {
         setConnectionState("connected");
         setAiState("listening");
         toast.success("Connected to AI Assistant");
+        
+        // Send patient context if available
+        if (intake) {
+          const context = getSystemPromptContext();
+          ws.send(JSON.stringify({
+            type: "context",
+            data: {
+              patientId: intake.patientId,
+              fullName: intake.fullName,
+              age: intake.age,
+              gender: intake.gender,
+              chiefComplaint: intake.chiefComplaint,
+              symptoms: intake.symptoms,
+              symptomDuration: intake.symptomDuration,
+              painLevel: intake.painLevel,
+              allergies: intake.allergies,
+              currentMedications: intake.currentMedications,
+              medicalHistory: intake.medicalHistory,
+              consultationType: intake.consultationType,
+              contextPrompt: context,
+            }
+          }));
+          console.log("Sent patient context to AI");
+          
+          // Send attached images if any
+          if (intake.attachedImages && intake.attachedImages.length > 0) {
+            for (const img of intake.attachedImages) {
+              ws.send(JSON.stringify({
+                type: "image",
+                data: img.dataUrl,
+                imageType: img.type,
+              }));
+            }
+            console.log(`Sent ${intake.attachedImages.length} attached images`);
+          }
+        }
         
         // Start voice activity detection
         startVoiceActivityDetection(stream);
@@ -427,9 +478,9 @@ export default function ConsultationVideoPage() {
     }
   }, []);
   
-  // Initialize
+  // Initialize camera/mic only after intake form is complete
   React.useEffect(() => {
-    if (!isClient) return;
+    if (!isClient || !showVideoCall) return;
     
     let mounted = true;
     
@@ -460,7 +511,7 @@ export default function ConsultationVideoPage() {
       mounted = false;
       cleanup();
     };
-  }, [isClient, initializeConnection]);
+  }, [isClient, showVideoCall, initializeConnection]);
   
   // Cleanup
   const cleanup = () => {
@@ -532,17 +583,18 @@ export default function ConsultationVideoPage() {
   if (!isClient) {
     return (
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-        <div className="relative flex min-h-0 flex-1 basis-[70%] flex-col">
-          <Card className="m-2 flex flex-1 flex-col overflow-hidden lg:m-4">
-            <CardContent className="relative flex flex-1 flex-col p-0">
-              <div className="relative flex-1 bg-gradient-to-br from-slate-900 via-blue-950 to-purple-950 min-h-[400px] flex items-center justify-center">
-                <div className="text-white text-lg">Loading...</div>
-              </div>
-            </CardContent>
-          </Card>
+        <div className="relative flex min-h-0 flex-1 flex-col">
+          <div className="flex-1 bg-gradient-to-br from-slate-900 via-blue-950 to-purple-950 min-h-[400px] flex items-center justify-center">
+            <div className="text-white text-lg">Loading...</div>
+          </div>
         </div>
       </div>
     );
+  }
+
+  // Show intake form first, then video call after completion
+  if (!showVideoCall) {
+    return <IntakeForm onComplete={handleIntakeComplete} />;
   }
 
   return (
@@ -551,6 +603,41 @@ export default function ConsultationVideoPage() {
         <Card className="m-2 flex flex-1 flex-col overflow-hidden lg:m-4">
           <CardContent className="relative flex flex-1 flex-col p-0">
             <div className="relative flex-1 bg-gradient-to-br from-slate-900 via-blue-950 to-purple-950 min-h-[400px]">
+              {/* Patient Context Banner */}
+              {hasIntakeData && intake && (
+                <div className="absolute top-0 left-0 right-0 z-10 bg-gradient-to-r from-blue-900/80 to-purple-900/80 backdrop-blur-sm border-b border-white/10 px-4 py-2">
+                  <div className="flex items-center gap-3 text-sm">
+                    <div className="flex items-center gap-2 text-blue-300">
+                      <User className="w-4 h-4" />
+                      <span className="font-medium">{intake.fullName}</span>
+                      <span className="text-blue-400/70">({intake.age}y, {intake.gender})</span>
+                    </div>
+                    <div className="h-4 w-px bg-white/20" />
+                    <div className="flex-1 text-white/70 truncate">
+                      <FileText className="w-3 h-3 inline mr-1" />
+                      {intake.chiefComplaint.substring(0, 80)}{intake.chiefComplaint.length > 80 ? "..." : ""}
+                    </div>
+                    {intake.symptoms.length > 0 && (
+                      <>
+                        <div className="h-4 w-px bg-white/20" />
+                        <div className="flex gap-1">
+                          {intake.symptoms.slice(0, 3).map((s) => (
+                            <Badge key={s} variant="outline" className="text-[10px] border-blue-400/50 text-blue-300">
+                              {s}
+                            </Badge>
+                          ))}
+                          {intake.symptoms.length > 3 && (
+                            <Badge variant="outline" className="text-[10px] border-blue-400/50 text-blue-300">
+                              +{intake.symptoms.length - 3}
+                            </Badge>
+                          )}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+              
               {/* AI Assistant Avatar */}
               <div className="absolute inset-0 flex flex-col items-center justify-center">
                 {/* Background effects */}
