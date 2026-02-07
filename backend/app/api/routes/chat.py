@@ -504,6 +504,176 @@ async def chat_ws(websocket: WebSocket) -> None:
         await websocket.close(code=1011)
 
 
+@router.websocket("/ws/realtime")
+async def realtime_voice_ws(websocket: WebSocket) -> None:
+    """
+    WebSocket for real-time voice conversation like Zoom/Gemini video calls.
+
+    Supports continuous audio streaming with voice activity detection.
+    Messages:
+        - Client sends: {"type": "audio", "data": base64_audio_chunk}
+        - Client sends: {"type": "audio_end"} when speech ends
+        - Client sends: {"type": "image", "data": base64_image} for context
+        - Server sends: {"type": "listening"} when ready
+        - Server sends: {"type": "processing"} when processing speech
+        - Server sends: {"type": "speaking", "text": response_text}
+        - Server sends: {"type": "complete", "data": full_response}
+    """
+    await websocket.accept()
+
+    settings = get_settings()
+    orchestrator = await get_orchestrator(settings)
+
+    # Session state
+    audio_chunks: list[bytes] = []
+    current_image_bytes: bytes | None = None
+
+    try:
+        # Notify client we're ready
+        await websocket.send_json({"type": "listening"})
+
+        while True:
+            payload = await websocket.receive_json()
+            msg_type = payload.get("type")
+
+            # Handle ping/pong
+            if msg_type in ("ping", "pong", "heartbeat"):
+                await websocket.send_json({"type": "pong"})
+                continue
+
+            # Handle image context (captured from video feed)
+            if msg_type == "image":
+                image_data = payload.get("data")
+                if image_data:
+                    if "," in image_data:
+                        image_data = image_data.split(",", 1)[1]
+                    current_image_bytes = base64.b64decode(image_data)
+                    logger.debug(
+                        "Received image context, %d bytes", len(current_image_bytes)
+                    )
+                continue
+
+            # Handle audio chunk
+            if msg_type == "audio":
+                audio_data = payload.get("data")
+                if audio_data:
+                    if "," in audio_data:
+                        audio_data = audio_data.split(",", 1)[1]
+                    chunk = base64.b64decode(audio_data)
+                    audio_chunks.append(chunk)
+                continue
+
+            # Handle end of speech - process accumulated audio
+            if msg_type == "audio_end":
+                if not audio_chunks:
+                    await websocket.send_json({"type": "listening"})
+                    continue
+
+                # Concatenate all audio chunks
+                full_audio = b"".join(audio_chunks)
+                audio_chunks.clear()
+
+                if len(full_audio) < 1000:  # Too short to be meaningful speech
+                    await websocket.send_json({"type": "listening"})
+                    continue
+
+                # Notify client we're processing
+                await websocket.send_json({"type": "processing"})
+
+                try:
+                    # Process with orchestrator in voice mode
+                    result = await orchestrator.process_request(
+                        text=None,
+                        image_bytes=current_image_bytes,
+                        audio_bytes=full_audio,
+                        mode="voice",
+                    )
+
+                    response_text = result.get("response", "")
+                    transcript = result.get("transcript", "")
+
+                    # Send response to client
+                    await websocket.send_json(
+                        {
+                            "type": "speaking",
+                            "text": response_text,
+                            "transcript": transcript,
+                        }
+                    )
+
+                    # Send full structured response
+                    triage_level = result.get("triage_level", "LOW")
+                    response = ChatResponse(
+                        message_id=generate_message_id(),
+                        timestamp=__import__("datetime").datetime.now().isoformat(),
+                        response_text=response_text,
+                        triage_level=triage_level,
+                        triage_color=determine_triage_color(triage_level),
+                        confidence=result.get("confidence", 0.5),
+                        findings=format_findings_for_ui(result.get("findings", [])),
+                        differential_diagnosis=format_differential_for_ui(
+                            result.get("raw_results", {})
+                        ),
+                        recommended_actions=format_actions_for_ui(
+                            result.get("raw_results", {}), response_text
+                        ),
+                        is_streaming=False,
+                    )
+
+                    await websocket.send_json(
+                        {"type": "complete", "data": response.model_dump()}
+                    )
+
+                except Exception as e:
+                    logger.error("Realtime processing error: %s", e)
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "message": "Processing failed. Please try again.",
+                        }
+                    )
+
+                # Ready for next speech
+                await websocket.send_json({"type": "listening"})
+                continue
+
+            # Handle text input (typed messages during call)
+            if msg_type == "text":
+                text = payload.get("text", "")
+                if text:
+                    await websocket.send_json({"type": "processing"})
+
+                    result = await orchestrator.process_request(
+                        text=text,
+                        image_bytes=current_image_bytes,
+                        audio_bytes=None,
+                        mode="voice",
+                    )
+
+                    response_text = result.get("response", "")
+                    await websocket.send_json(
+                        {
+                            "type": "speaking",
+                            "text": response_text,
+                        }
+                    )
+
+                    await websocket.send_json({"type": "listening"})
+                continue
+
+    except WebSocketDisconnect:
+        logger.info("Realtime voice WebSocket disconnected")
+    except Exception as exc:
+        logger.exception("Realtime voice WebSocket error: %s", exc)
+        try:
+            await websocket.send_json(
+                {"type": "error", "message": "Connection error occurred."}
+            )
+        except Exception:
+            pass
+        await websocket.close(code=1011)
+
+
 @router.websocket("/ws/stream")
 async def chat_ws_stream(websocket: WebSocket) -> None:
     """
@@ -610,6 +780,211 @@ async def get_room_state(request: Request, room_id: str) -> dict:
         "room_id": room.room_id,
         "peers": list(room.peers),
     }
+
+
+# ============================================================================
+# WEBRTC AI REAL-TIME VIDEO CALLING ENDPOINTS
+# ============================================================================
+
+
+class WebRTCAIOfferRequest(BaseModel):
+    """Request for WebRTC AI session offer."""
+
+    session_id: str
+    sdp: str
+    sdp_type: str = "offer"
+
+
+class WebRTCAIAnswerResponse(BaseModel):
+    """Response containing WebRTC answer."""
+
+    session_id: str
+    sdp: str
+    sdp_type: str
+
+
+class WebRTCAIIceCandidate(BaseModel):
+    """ICE candidate for WebRTC AI session."""
+
+    session_id: str
+    candidate: str
+    sdp_mid: Optional[str] = None
+    sdp_m_line_index: Optional[int] = None
+
+
+@router.post("/webrtc-ai/offer", response_model=WebRTCAIAnswerResponse)
+async def webrtc_ai_offer(
+    request: Request, payload: WebRTCAIOfferRequest
+) -> WebRTCAIAnswerResponse:
+    """
+    Handle WebRTC offer for AI video calling.
+
+    This creates a real-time WebRTC connection for video consultation with AI.
+    The AI will process audio in real-time and respond via voice.
+    """
+    from app.services.webrtc_ai_handler import get_webrtc_ai_manager
+
+    settings = get_settings()
+    orchestrator = await get_orchestrator(settings)
+    manager = get_webrtc_ai_manager()
+
+    # Create or get session
+    session = manager.get_session(payload.session_id)
+    if session:
+        await manager.close_session(payload.session_id)
+
+    session = manager.create_session(
+        session_id=payload.session_id,
+        orchestrator=orchestrator,
+    )
+
+    # Handle the offer and get answer
+    answer = await session.handle_offer(payload.sdp, payload.sdp_type)
+
+    return WebRTCAIAnswerResponse(
+        session_id=payload.session_id,
+        sdp=answer.sdp,
+        sdp_type=answer.type,
+    )
+
+
+@router.post("/webrtc-ai/ice")
+async def webrtc_ai_ice(payload: WebRTCAIIceCandidate) -> dict:
+    """Handle ICE candidate for WebRTC AI session."""
+    from app.services.webrtc_ai_handler import get_webrtc_ai_manager
+
+    manager = get_webrtc_ai_manager()
+    session = manager.get_session(payload.session_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    await session.add_ice_candidate(
+        {
+            "candidate": payload.candidate,
+            "sdpMid": payload.sdp_mid,
+            "sdpMLineIndex": payload.sdp_m_line_index,
+        }
+    )
+
+    return {"status": "ok"}
+
+
+@router.post("/webrtc-ai/close/{session_id}")
+async def webrtc_ai_close(session_id: str) -> dict:
+    """Close a WebRTC AI session."""
+    from app.services.webrtc_ai_handler import get_webrtc_ai_manager
+
+    manager = get_webrtc_ai_manager()
+    await manager.close_session(session_id)
+
+    return {"status": "closed"}
+
+
+@router.websocket("/ws/webrtc-ai/{session_id}")
+async def webrtc_ai_signaling_ws(websocket: WebSocket, session_id: str) -> None:
+    """
+    WebSocket for WebRTC AI signaling and real-time updates.
+
+    This provides a bidirectional channel for:
+    - WebRTC signaling (offer/answer/ice)
+    - Real-time transcript updates
+    - AI response notifications
+    - State change notifications
+    """
+    await websocket.accept()
+
+    from app.services.webrtc_ai_handler import get_webrtc_ai_manager
+
+    settings = get_settings()
+    orchestrator = await get_orchestrator(settings)
+    manager = get_webrtc_ai_manager()
+
+    # Callbacks to send updates to client
+    async def on_transcript(text: str):
+        try:
+            await websocket.send_json(
+                {
+                    "type": "transcript",
+                    "text": text,
+                }
+            )
+        except Exception:
+            pass
+
+    async def on_response(text: str):
+        try:
+            await websocket.send_json(
+                {
+                    "type": "response",
+                    "text": text,
+                }
+            )
+        except Exception:
+            pass
+
+    async def on_state_change(state: str):
+        try:
+            await websocket.send_json(
+                {
+                    "type": "state",
+                    "state": state,
+                }
+            )
+        except Exception:
+            pass
+
+    # Create session with callbacks
+    session = manager.create_session(
+        session_id=session_id,
+        orchestrator=orchestrator,
+        on_transcript=lambda t: asyncio.create_task(on_transcript(t)),
+        on_response=lambda r: asyncio.create_task(on_response(r)),
+        on_state_change=lambda s: asyncio.create_task(on_state_change(s)),
+    )
+
+    try:
+        await websocket.send_json({"type": "ready", "session_id": session_id})
+
+        while True:
+            payload = await websocket.receive_json()
+            msg_type = payload.get("type")
+
+            if msg_type == "offer":
+                # Handle WebRTC offer
+                answer = await session.handle_offer(
+                    payload.get("sdp"), payload.get("sdp_type", "offer")
+                )
+                await websocket.send_json(
+                    {
+                        "type": "answer",
+                        "sdp": answer.sdp,
+                        "sdp_type": answer.type,
+                    }
+                )
+
+            elif msg_type == "ice":
+                # Handle ICE candidate
+                await session.add_ice_candidate(
+                    {
+                        "candidate": payload.get("candidate"),
+                        "sdpMid": payload.get("sdp_mid"),
+                        "sdpMLineIndex": payload.get("sdp_m_line_index"),
+                    }
+                )
+
+            elif msg_type == "ping":
+                await websocket.send_json({"type": "pong"})
+
+    except WebSocketDisconnect:
+        logger.info("WebRTC AI signaling disconnected: %s", session_id)
+    except Exception as exc:
+        logger.exception("WebRTC AI signaling error: %s", exc)
+    finally:
+        await manager.close_session(session_id)
+
+
+import asyncio
 
 
 # ============================================================================

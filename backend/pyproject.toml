@@ -28,6 +28,11 @@ dependencies = [
   "opencv-python",
   "firebase-admin",
   "tensorflow",  # Required for Derm Foundation (HAI-DEF)
+  "SpeechRecognition",
+  "pydub",
+  "aiortc",
+  "av",
+  "gTTS",
 ]
 
 [dependency-groups]

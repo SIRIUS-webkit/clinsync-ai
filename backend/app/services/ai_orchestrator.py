@@ -20,6 +20,7 @@ from app.models.derm_foundation_wrapper import (
     DermFoundationWrapper,
     get_derm_foundation,
 )
+from app.services.speech_recognition_service import get_speech_recognition_service
 
 logger = logging.getLogger(__name__)
 
@@ -117,11 +118,39 @@ class AIOrchestrator:
             or ""
         )
 
-        # For voice mode: Check if the query actually needs image analysis
+        # For voice mode: Always analyze image if present (user is showing something on camera)
+        # This ensures we analyze skin conditions even if transcription fails
         needs_image = False
-        if mode == "voice" and has_image and user_input:
-            needs_image = self._query_needs_visual_analysis(user_input)
-            logger.info("Voice mode - needs image analysis: %s", needs_image)
+        if mode == "voice" and has_image:
+            # In video call mode, user is likely showing something - analyze it
+            # If we have text, check if it's explicitly about the image
+            if user_input:
+                needs_image = self._query_needs_visual_analysis(user_input)
+                # If transcription mentions skin, rash, itch, look, see, show, check - analyze image
+                if not needs_image:
+                    visual_keywords = [
+                        "skin",
+                        "rash",
+                        "itch",
+                        "look",
+                        "see",
+                        "show",
+                        "check",
+                        "this",
+                        "here",
+                        "my",
+                    ]
+                    needs_image = any(
+                        kw in user_input.lower() for kw in visual_keywords
+                    )
+            else:
+                # No transcription - but user might be showing something, analyze anyway
+                needs_image = True
+            logger.info(
+                "Voice mode - needs image analysis: %s (input: '%s')",
+                needs_image,
+                user_input[:50] if user_input else "(empty)",
+            )
         elif mode == "chat":
             # Chat mode always analyzes image if present
             needs_image = has_image
@@ -813,13 +842,26 @@ Now respond to the patient:"""
             return {"error": str(e), "findings": [], "confidence": 0}
 
     async def _analyze_audio_transcription(self, audio_bytes: bytes) -> Dict[str, Any]:
-        """Transcribe audio using MedASR."""
+        """Transcribe audio using SpeechRecognition service.
+
+        Uses the SpeechRecognition package with Google's free speech API
+        for accurate, real-time transcription.
+        """
         try:
-            text = await self._run_in_thread(self._medasr.transcribe, audio_bytes)
+            # Use the new SpeechRecognition service instead of Whisper/MedASR
+            stt_service = get_speech_recognition_service()
+            text = await self._run_in_thread(stt_service.transcribe, audio_bytes)
+            logger.info("Transcription result: %s", text[:100] if text else "(empty)")
             return {"text": text}
         except Exception as e:
             logger.error("Audio transcription failed: %s", e)
-            return {"error": str(e), "text": None}
+            # Fallback to MedASR if SpeechRecognition fails
+            try:
+                text = await self._run_in_thread(self._medasr.transcribe, audio_bytes)
+                return {"text": text}
+            except Exception as e2:
+                logger.error("Fallback transcription also failed: %s", e2)
+                return {"error": str(e), "text": None}
 
     async def _analyze_audio_biomarkers(self, audio_bytes: bytes) -> Dict[str, Any]:
         """Analyze audio biomarkers using HeAR."""
